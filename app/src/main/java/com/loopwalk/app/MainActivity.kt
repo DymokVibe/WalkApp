@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -167,12 +168,10 @@ fun LoopWalkApp() {
         }
     }
 
-    // Сохраняем параметры генератора при их изменении
     LaunchedEffect(inputMode, routeProfile, sliderValue) {
         storage.saveGeneratorPrefs(inputMode, routeProfile, sliderValue)
     }
 
-    // Жизненный цикл OSMDroid MapView (исправляет подвисание тайлов после блокировки экрана)
     DisposableEffect(lifecycleOwner, mapViewRef) {
         val mv = mapViewRef
         val observer = LifecycleEventObserver { _, event ->
@@ -188,7 +187,6 @@ fun LoopWalkApp() {
         }
     }
 
-    // Не гасить экран во время активной прогулки
     DisposableEffect(walkState.isWalking, profile.keepScreenOn) {
         val window = (context as? Activity)?.window
         if (walkState.isWalking && profile.keepScreenOn) {
@@ -201,7 +199,6 @@ fun LoopWalkApp() {
         }
     }
 
-    // Аппаратный компас для режима "КУРС" с фильтрацией дребезга (не грузит UI)
     DisposableEffect(headingUpMode) {
         if (!headingUpMode) {
             mapViewRef?.setMapOrientation(0f)
@@ -337,7 +334,6 @@ fun LoopWalkApp() {
         }
     }
 
-    // Пассивный GPS до старта прогулки
     DisposableEffect(walkState.isWalking) {
         if (walkState.isWalking) {
             onDispose { }
@@ -384,7 +380,6 @@ fun LoopWalkApp() {
         }
     }
 
-    // Кэшированные полигоны Тумана войны и захваченных контуров (не пересоздаются каждую секунду)
     val cachedCapturedOverlays = remember(profile.capturedPolygons.size) {
         profile.capturedPolygons.takeLast(30).map { polyPoints ->
             Polygon().apply {
@@ -424,7 +419,6 @@ fun LoopWalkApp() {
                     setBuiltInZoomControls(false)
                     overlayManager.tilesOverlay.setColorFilter(TilesOverlay.INVERT_COLORS)
                     controller.setZoom(16.0)
-                    // При ручном перетаскивании карты пальцем отключаем автоследование, чтобы карта не отпружинивала
                     setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_MOVE && event.pointerCount == 1) {
                             followUser = false
@@ -439,6 +433,8 @@ fun LoopWalkApp() {
                 mapView.overlays.clear()
 
                 val userLoc = walkState.currentLocation
+                val closestPt = walkState.routeClosestPoint
+                val nextTurnPt = walkState.nextManeuverPoint
 
                 fun showPinInfo(title: String, subtitle: String, badge: String, pt: GeoPoint, canSteer: Boolean = true) {
                     val distStr = userLoc?.let { " • ${it.distanceToAsDouble(pt).roundToInt()} м от вас" } ?: ""
@@ -499,7 +495,7 @@ fun LoopWalkApp() {
 
                     val activePoints = if (walkState.isWalking && splitIdx > 0 && splitIdx < route.points.lastIndex) {
                         val list = ArrayList<GeoPoint>()
-                        walkState.routeClosestPoint?.let { list.add(it) }
+                        closestPt?.let { list.add(it) }
                         list.addAll(route.points.subList(splitIdx + 1, route.points.size))
                         list
                     } else {
@@ -588,10 +584,10 @@ fun LoopWalkApp() {
                 }
 
                 if (walkState.isWalking && walkState.offRouteMeters > 30.0 &&
-                    userLoc != null && walkState.routeClosestPoint != null
+                    userLoc != null && closestPt != null
                 ) {
                     val tether = Polyline().apply {
-                        setPoints(listOf(userLoc, walkState.routeClosestPoint))
+                        setPoints(listOf(userLoc, closestPt))
                         outlinePaint.color = AndroidColor.rgb(255, 82, 82)
                         outlinePaint.strokeWidth = 5f
                         outlinePaint.pathEffect = DashPathEffect(floatArrayOf(16f, 12f), 0f)
@@ -637,9 +633,9 @@ fun LoopWalkApp() {
                     mapView.overlays.add(bMarker)
                 }
 
-                if (walkState.isWalking && walkState.nextManeuverPoint != null) {
+                if (walkState.isWalking && nextTurnPt != null) {
                     val turnMarker = Marker(mapView).apply {
-                        position = walkState.nextManeuverPoint
+                        position = nextTurnPt
                         icon = visuals.nextTurnDot()
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         setOnMarkerClickListener { _, _ ->
@@ -647,7 +643,7 @@ fun LoopWalkApp() {
                                 title = "СЛЕДУЮЩИЙ МАНЕВР",
                                 subtitle = walkState.nextManeuverHint ?: "",
                                 badge = walkState.nextManeuverDirection.shortLabel,
-                                pt = walkState.nextManeuverPoint,
+                                pt = nextTurnPt,
                                 canSteer = false
                             )
                             true
@@ -927,6 +923,7 @@ fun LoopWalkApp() {
 
                         if (isOffRoute) {
                             Box(
+                                contentAlignment = Alignment.Center,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(AlertRed)
@@ -954,12 +951,12 @@ fun LoopWalkApp() {
                                     .padding(horizontal = 9.dp, vertical = 8.dp)
                             ) {
                                 Text(
-                                    text = if (isRerouting) "..." else "НОВЫЙ
-ПУТЬ",
+                                    text = if (isRerouting) "..." else "НОВЫЙ\nПУТЬ",
                                     color = AmoledBlack,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 9.sp
+                                    fontSize = 9.sp,
+                                    textAlign = TextAlign.Center
                                 )
                             }
                         }
@@ -1026,13 +1023,13 @@ fun LoopWalkApp() {
                 }
             }
 
-            if (generatedRoute != null) {
+            generatedRoute?.let { route ->
                 MapFabButton(
                     symbol = "⤢",
                     label = "КРУГ",
                     active = false
                 ) {
-                    fitRouteToMap(generatedRoute!!)
+                    fitRouteToMap(route)
                 }
             }
 
@@ -1368,7 +1365,7 @@ fun LoopWalkApp() {
                                 )
                             }
 
-                            if (generatedRoute != null) {
+                            generatedRoute?.let { activeBuiltRoute ->
                                 Button(
                                     onClick = {
                                         val hasLoc = ContextCompat.checkSelfPermission(
@@ -1384,7 +1381,7 @@ fun LoopWalkApp() {
                                         confirmFinishArmed = false
                                         WalkSessionHolder.startNewSession(
                                             startPt = walkState.currentLocation,
-                                            route = generatedRoute,
+                                            route = activeBuiltRoute,
                                             knownSectors = profile.exploredSectors,
                                             haptic = profile.hapticNavEnabled,
                                             voice = profile.voiceNavEnabled
@@ -1411,7 +1408,7 @@ fun LoopWalkApp() {
 
                                 OutlinedButton(
                                     onClick = {
-                                        val file = storage.exportGpxFile(generatedRoute!!)
+                                        val file = storage.exportGpxFile(activeBuiltRoute)
                                         val uri = FileProvider.getUriForFile(
                                             context, "${context.packageName}.fileprovider", file
                                         )
@@ -1449,7 +1446,6 @@ fun LoopWalkApp() {
                             fontSize = 9.sp
                         )
                     } else {
-                        // Экран активной прогулки
                         val mins = walkState.elapsedSeconds / 60
                         val secs = walkState.elapsedSeconds % 60
                         val displaySteps = if (walkState.sessionSteps > 0) {
@@ -1679,15 +1675,15 @@ fun LoopWalkApp() {
         }
     }
 
-    // Интерактивная шторка списка поворотов маршрута
-    if (showStepsDialog && generatedRoute != null) {
+    val routeForSteps = generatedRoute
+    if (showStepsDialog && routeForSteps != null) {
         ModalBottomSheet(
             onDismissRequest = { showStepsDialog = false },
             containerColor = Color(0xFF090D0B),
             contentColor = TextPrimary,
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
         ) {
-            val steps = generatedRoute!!.maneuvers
+            val steps = routeForSteps.maneuvers
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1769,7 +1765,6 @@ fun LoopWalkApp() {
         }
     }
 
-    // Единая нижняя шторка: Профиль / Журнал / Калибровка
     if (activeSheetTab != null) {
         ModalBottomSheet(
             onDismissRequest = { activeSheetTab = null },
