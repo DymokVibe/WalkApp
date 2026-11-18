@@ -279,7 +279,7 @@ fun LoopWalkApp() {
 
                     // 2. Открытые сектора Тумана войны
                     val allSectors = profile.exploredSectors + walkState.newlyDiscoveredSectors
-                    for (sec in allSectors.takeLast(160)) {
+                    for (sec in allSectors.toList().takeLast(160)) {
                         val poly = Polygon().apply {
                             points = storage.sectorPolygon(sec)
                             fillPaint.color = AndroidColor.argb(32, 0, 255, 102)
