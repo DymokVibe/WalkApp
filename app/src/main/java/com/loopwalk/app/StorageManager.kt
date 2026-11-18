@@ -43,6 +43,7 @@ class StorageManager(private val context: Context) {
             lastWalkEpochDay = prefs.getLong("last_walk_day", -1L),
             totalWalks = prefs.getInt("total_walks", 0),
             totalMeters = prefs.getFloat("total_meters", 0f).toDouble(),
+            totalSeconds = prefs.getLong("total_seconds", 0L),
             totalCapturedAreaSqM = prefs.getFloat("total_area_sqm", 0f).toDouble(),
             totalBeaconsCollected = prefs.getInt("total_beacons", 0),
             exploredSectors = prefs.getStringSet("explored_sectors", emptySet()) ?: emptySet(),
@@ -50,15 +51,22 @@ class StorageManager(private val context: Context) {
             walkHistory = loadHistory(),
             heightCm = prefs.getInt("height_cm", 178),
             paceKmh = prefs.getFloat("pace_kmh", 4.8f).toDouble(),
-            hapticNavEnabled = prefs.getBoolean("haptic_nav", true)
+            hapticNavEnabled = prefs.getBoolean("haptic_nav", true),
+            showMileposts = prefs.getBoolean("show_mileposts", true)
         )
     }
 
-    fun updateSettings(heightCm: Int, paceKmh: Double, hapticNav: Boolean): UserProfile {
+    fun updateSettings(
+        heightCm: Int,
+        paceKmh: Double,
+        hapticNav: Boolean,
+        showMileposts: Boolean
+    ): UserProfile {
         prefs.edit()
             .putInt("height_cm", heightCm.coerceIn(130, 220))
             .putFloat("pace_kmh", paceKmh.coerceIn(2.5, 8.0).toFloat())
             .putBoolean("haptic_nav", hapticNav)
+            .putBoolean("show_mileposts", showMileposts)
             .apply()
         return loadProfile()
     }
@@ -92,6 +100,19 @@ class StorageManager(private val context: Context) {
             GeoPoint(lat + d, lon + d),
             GeoPoint(lat - d, lon + d)
         )
+    }
+
+    fun circlePolygon(center: GeoPoint, radiusMeters: Double, steps: Int = 28): List<GeoPoint> {
+        val latConv = 110540.0
+        val lonConv = 111320.0 * cos(Math.toRadians(center.latitude)).coerceAtLeast(0.1)
+        val pts = ArrayList<GeoPoint>(steps)
+        for (i in 0 until steps) {
+            val angle = 2.0 * Math.PI * i / steps
+            val dLat = (radiusMeters * kotlin.math.sin(angle)) / latConv
+            val dLon = (radiusMeters * kotlin.math.cos(angle)) / lonConv
+            pts.add(GeoPoint(center.latitude + dLat, center.longitude + dLon))
+        }
+        return pts
     }
 
     fun calculatePolygonAreaSqM(points: List<GeoPoint>): Double {
@@ -203,6 +224,7 @@ class StorageManager(private val context: Context) {
             .putLong("last_walk_day", lastDay)
             .putInt("total_walks", current.totalWalks + 1)
             .putFloat("total_meters", (current.totalMeters + walkedMeters).toFloat())
+            .putLong("total_seconds", current.totalSeconds + elapsedSeconds)
             .putFloat("total_area_sqm", (current.totalCapturedAreaSqM + areaSqM).toFloat())
             .putInt("total_beacons", current.totalBeaconsCollected + beaconsCollected)
             .putStringSet("explored_sectors", mergedSectors)

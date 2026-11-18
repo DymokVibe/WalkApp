@@ -10,8 +10,8 @@ enum class InputMode(val label: String, val unit: String) {
 
 enum class RouteProfile(val label: String) {
     SCENIC("ПАРК / ТРОПЫ"),
-    PAVED("УЛИЦЫ / АСФАЛЬТ"),
-    NIGHT_LIT("ВЕЧЕР / ФОНАРИ")
+    PAVED("УЛИЦЫ"),
+    NIGHT_LIT("ФОНАРИ")
 }
 
 data class RouteManeuver(
@@ -28,6 +28,17 @@ data class RouteBeacon(
     val collected: Boolean = false
 )
 
+data class RouteMilepost(
+    val point: GeoPoint,
+    val label: String,
+    val metersFromStart: Int
+)
+
+data class DirectionArrow(
+    val point: GeoPoint,
+    val bearingDeg: Float
+)
+
 data class LoopRoute(
     val points: List<GeoPoint>,
     val distanceMeters: Double,
@@ -36,6 +47,8 @@ data class LoopRoute(
     val profile: RouteProfile,
     val maneuvers: List<RouteManeuver> = emptyList(),
     val beacons: List<RouteBeacon> = emptyList(),
+    val mileposts: List<RouteMilepost> = emptyList(),
+    val arrows: List<DirectionArrow> = emptyList(),
     val isOfflineFallback: Boolean = false
 )
 
@@ -61,6 +74,7 @@ data class Achievement(
     val id: String,
     val title: String,
     val description: String,
+    val progressRatio: Float,
     val unlocked: Boolean
 )
 
@@ -71,6 +85,7 @@ data class UserProfile(
     val lastWalkEpochDay: Long = -1L,
     val totalWalks: Int = 0,
     val totalMeters: Double = 0.0,
+    val totalSeconds: Long = 0L,
     val totalCapturedAreaSqM: Double = 0.0,
     val totalBeaconsCollected: Int = 0,
     val exploredSectors: Set<String> = emptySet(),
@@ -78,7 +93,8 @@ data class UserProfile(
     val walkHistory: List<WalkRecord> = emptyList(),
     val heightCm: Int = 178,
     val paceKmh: Double = 4.8,
-    val hapticNavEnabled: Boolean = true
+    val hapticNavEnabled: Boolean = true,
+    val showMileposts: Boolean = true
 ) {
     val strideMeters: Double
         get() = (heightCm * 0.415) / 100.0
@@ -104,11 +120,47 @@ data class UserProfile(
 
     val achievements: List<Achievement>
         get() = listOf(
-            Achievement("FIRST_LOOP", "ПЕРВЫЙ КОНТУР", "Завершить первую прогулку", totalWalks >= 1),
-            Achievement("STREAK_7", "НЕДЕЛЯ В РИТМЕ", "Достичь серии из 7 дней подряд", streakDays >= 7),
-            Achievement("SECTORS_50", "КАРТОГРАФ РАЙОНА", "Открыть 50 секторов Тумана войны", exploredSectors.size >= 50),
-            Achievement("AREA_1HA", "ТЕРРИТОРИАЛЬНЫЙ ЗАХВАТ", "Замкнуть контуры площадью 10 000+ м2", totalCapturedAreaSqM >= 10000.0),
-            Achievement("BEACONS_10", "ПЕРЕХВАТЧИК СИГНАЛОВ", "Расшифровать 10 сигнальных маяков", totalBeaconsCollected >= 10),
-            Achievement("DIST_25KM", "ПЕШИЙ МАРАФОН", "Пройти суммарно 25 км", totalMeters >= 25000.0)
+            Achievement(
+                "FIRST_LOOP",
+                "ПЕРВЫЙ КОНТУР",
+                "Завершить первую прогулку",
+                (totalWalks / 1f).coerceIn(0f, 1f),
+                totalWalks >= 1
+            ),
+            Achievement(
+                "STREAK_7",
+                "НЕДЕЛЯ В РИТМЕ",
+                "Достичь серии из 7 дней подряд",
+                (streakDays / 7f).coerceIn(0f, 1f),
+                streakDays >= 7
+            ),
+            Achievement(
+                "SECTORS_50",
+                "КАРТОГРАФ РАЙОНА",
+                "Открыть 50 секторов Тумана войны",
+                (exploredSectors.size / 50f).coerceIn(0f, 1f),
+                exploredSectors.size >= 50
+            ),
+            Achievement(
+                "AREA_1HA",
+                "ТЕРРИТОРИАЛЬНЫЙ ЗАХВАТ",
+                "Замкнуть контуры площадью 10 000+ м²",
+                (totalCapturedAreaSqM / 10000.0).toFloat().coerceIn(0f, 1f),
+                totalCapturedAreaSqM >= 10000.0
+            ),
+            Achievement(
+                "BEACONS_10",
+                "ПЕРЕХВАТЧИК СИГНАЛОВ",
+                "Расшифровать 10 сигнальных маяков",
+                (totalBeaconsCollected / 10f).coerceIn(0f, 1f),
+                totalBeaconsCollected >= 10
+            ),
+            Achievement(
+                "DIST_25KM",
+                "ПЕШИЙ МАРАФОН",
+                "Пройти суммарно 25 км",
+                (totalMeters / 25000.0).toFloat().coerceIn(0f, 1f),
+                totalMeters >= 25000.0
+            )
         )
 }

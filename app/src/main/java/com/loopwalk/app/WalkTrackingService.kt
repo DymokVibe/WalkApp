@@ -40,6 +40,7 @@ data class ActiveWalkState(
     val isWalking: Boolean = false,
     val isPaused: Boolean = false,
     val currentLocation: GeoPoint? = null,
+    val currentBearing: Float? = null,
     val walkStartPoint: GeoPoint? = null,
     val walkedMeters: Double = 0.0,
     val elapsedSeconds: Long = 0L,
@@ -47,6 +48,7 @@ data class ActiveWalkState(
     val breadcrumbTrail: List<GeoPoint> = emptyList(),
     val newlyDiscoveredSectors: Set<String> = emptySet(),
     val activeBeacons: List<RouteBeacon> = emptyList(),
+    val nextManeuverPoint: GeoPoint? = null,
     val nextManeuverHint: String? = null,
     val distanceToNextTurnMeters: Int? = null,
     val nearestBeaconMeters: Int? = null,
@@ -61,14 +63,20 @@ object WalkSessionHolder {
     var exploredBaseline: Set<String> = emptySet()
     var hapticEnabled: Boolean = true
 
-    fun updateLocationPassive(pt: GeoPoint) {
-        _state.update { it.copy(currentLocation = pt) }
+    fun updateLocationPassive(pt: GeoPoint, bearing: Float? = null) {
+        _state.update {
+            it.copy(
+                currentLocation = pt,
+                currentBearing = bearing ?: it.currentBearing
+            )
+        }
     }
 
     fun startNewSession(startPt: GeoPoint?, route: LoopRoute?, knownSectors: Set<String>, haptic: Boolean) {
         activeRoute = route
         exploredBaseline = knownSectors
         hapticEnabled = haptic
+        val firstManeuver = route?.maneuvers?.getOrNull(1)
         _state.value = ActiveWalkState(
             isWalking = true,
             isPaused = false,
@@ -80,7 +88,8 @@ object WalkSessionHolder {
             breadcrumbTrail = listOfNotNull(startPt),
             newlyDiscoveredSectors = emptySet(),
             activeBeacons = route?.beacons ?: emptyList(),
-            nextManeuverHint = route?.maneuvers?.getOrNull(1)?.instruction
+            nextManeuverPoint = firstManeuver?.point,
+            nextManeuverHint = firstManeuver?.instruction
         )
     }
 
@@ -94,7 +103,10 @@ object WalkSessionHolder {
 
     fun stopSession(): ActiveWalkState {
         val snapshot = _state.value
-        _state.value = ActiveWalkState(currentLocation = snapshot.currentLocation)
+        _state.value = ActiveWalkState(
+            currentLocation = snapshot.currentLocation,
+            currentBearing = snapshot.currentBearing
+        )
         return snapshot
     }
 
@@ -177,12 +189,15 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
 
     override fun onLocationChanged(loc: Location) {
         val pt = GeoPoint(loc.latitude, loc.longitude)
+        val bearing = if (loc.hasBearing() && loc.speed > 0.6f) loc.bearing else null
         val st = WalkSessionHolder.state.value
         val prev = st.currentLocation
         val nowMs = System.currentTimeMillis()
 
         if (!st.isWalking || st.isPaused) {
-            WalkSessionHolder.mutate { it.copy(currentLocation = pt) }
+            WalkSessionHolder.mutate {
+                it.copy(currentLocation = pt, currentBearing = bearing ?: it.currentBearing)
+            }
             lastGpsTimeMs = nowMs
             return
         }
@@ -194,7 +209,6 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
             val delta = prev.distanceToAsDouble(pt)
             val dtSec = ((nowMs - lastGpsTimeMs) / 1000.0).coerceAtLeast(1.0)
             val speedMs = delta / dtSec
-            // Фильтр дрейфа стоя на месте и фильтр транспорта (> 20 км/ч)
             if (delta in 2.0..80.0 && speedMs <= 5.6) {
                 addedDist = delta
             }
@@ -206,7 +220,6 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
             st.newlyDiscoveredSectors + secKey
         } else st.newlyDiscoveredSectors
 
-        // Проверка приближения к Сигнальным маякам (радиус 35 м)
         var flashMsg = st.eventFlash
         var minBeaconDist: Int? = null
         val updatedBeacons = st.activeBeacons.map { beacon ->
@@ -224,8 +237,8 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
             } else beacon
         }
 
-        // Проверка ближайшего поворота и вибро-подсказка за 30 м
         var nextHint = st.nextManeuverHint
+        var nextTurnPt = st.nextManeuverPoint
         var nextTurnDist: Int? = null
         val maneuvers = WalkSessionHolder.activeRoute?.maneuvers.orEmpty()
         for (i in 1 until maneuvers.size) {
@@ -233,6 +246,7 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
             val m = maneuvers[i]
             val distToTurn = pt.distanceToAsDouble(m.point)
             nextHint = m.instruction
+            nextTurnPt = m.point
             nextTurnDist = distToTurn.toInt()
             if (distToTurn <= 30.0) {
                 alertedManeuverIndices.add(i)
@@ -244,11 +258,13 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
         WalkSessionHolder.mutate {
             it.copy(
                 currentLocation = pt,
+                currentBearing = bearing ?: it.currentBearing,
                 walkStartPoint = it.walkStartPoint ?: pt,
                 walkedMeters = it.walkedMeters + addedDist,
                 breadcrumbTrail = if (addedDist > 0.0 || it.breadcrumbTrail.isEmpty()) it.breadcrumbTrail + pt else it.breadcrumbTrail,
                 newlyDiscoveredSectors = updatedSectors,
                 activeBeacons = updatedBeacons,
+                nextManeuverPoint = nextTurnPt,
                 nextManeuverHint = nextHint,
                 distanceToNextTurnMeters = nextTurnDist,
                 nearestBeaconMeters = minBeaconDist,

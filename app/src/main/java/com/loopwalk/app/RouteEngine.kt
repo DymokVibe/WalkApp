@@ -7,6 +7,7 @@ import org.json.JSONObject
 import org.osmdroid.util.GeoPoint
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -30,17 +31,28 @@ object RouteEngine {
         start: GeoPoint,
         targetMeters: Double,
         routeProfile: RouteProfile,
-        userProfile: UserProfile
+        userProfile: UserProfile,
+        directionAnchor: GeoPoint? = null
     ): LoopRoute = withContext(Dispatchers.IO) {
-        val baseBearing = Random.nextDouble(0.0, 360.0)
+        val baseBearing = if (directionAnchor != null) {
+            start.bearingTo(directionAnchor)
+        } else {
+            Random.nextDouble(0.0, 360.0)
+        }
         val direction = if (Random.nextBoolean()) 1.0 else -1.0
-        var legRadiusMeters = targetMeters / 4.25
+
+        var legRadiusMeters = if (directionAnchor != null) {
+            val anchorDist = start.distanceToAsDouble(directionAnchor)
+            anchorDist.coerceIn(targetMeters * 0.22, targetMeters * 0.42)
+        } else {
+            targetMeters / 4.25
+        }
 
         var bestResult: ValhallaResult? = null
 
         for (attempt in 0 until 3) {
-            val wp1 = offsetPoint(start, legRadiusMeters, baseBearing + 35.0 * direction)
-            val wp2 = offsetPoint(start, legRadiusMeters, baseBearing - 35.0 * direction)
+            val wp1 = offsetPoint(start, legRadiusMeters, baseBearing + 34.0 * direction)
+            val wp2 = offsetPoint(start, legRadiusMeters, baseBearing - 34.0 * direction)
             val waypoints = listOf(start, wp1, wp2, start)
 
             val result = queryValhallaPedestrian(waypoints, routeProfile, userProfile.paceKmh)
@@ -59,6 +71,9 @@ object RouteEngine {
                 .toInt().coerceAtLeast(1)
             val steps = (bestResult.distanceMeters / userProfile.strideMeters).toInt()
             val beacons = buildBeacons(bestResult.points)
+            val mileposts = buildMileposts(bestResult.points, bestResult.distanceMeters)
+            val arrows = buildDirectionArrows(bestResult.points, bestResult.distanceMeters)
+
             LoopRoute(
                 points = bestResult.points,
                 distanceMeters = bestResult.distanceMeters,
@@ -67,6 +82,8 @@ object RouteEngine {
                 profile = routeProfile,
                 maneuvers = bestResult.maneuvers,
                 beacons = beacons,
+                mileposts = mileposts,
+                arrows = arrows,
                 isOfflineFallback = false
             )
         } else {
@@ -81,6 +98,9 @@ object RouteEngine {
                 RouteBeacon(1, wp1, beaconNames[0]),
                 RouteBeacon(2, wp2, beaconNames[1])
             )
+            val mileposts = buildMileposts(fallbackPoints, targetMeters)
+            val arrows = buildDirectionArrows(fallbackPoints, targetMeters)
+
             LoopRoute(
                 points = fallbackPoints,
                 distanceMeters = targetMeters,
@@ -89,6 +109,8 @@ object RouteEngine {
                 profile = routeProfile,
                 maneuvers = emptyList(),
                 beacons = beacons,
+                mileposts = mileposts,
+                arrows = arrows,
                 isOfflineFallback = true
             )
         }
@@ -105,6 +127,64 @@ object RouteEngine {
         )
     }
 
+    private fun buildMileposts(path: List<GeoPoint>, totalMeters: Double): List<RouteMilepost> {
+        if (path.size < 3 || totalMeters < 750.0) return emptyList()
+        val stepMeters = if (totalMeters > 5500.0) 1000.0 else 500.0
+        val out = ArrayList<RouteMilepost>()
+        var accum = 0.0
+        var nextMark = stepMeters
+
+        for (i in 1 until path.size) {
+            val seg = path[i - 1].distanceToAsDouble(path[i])
+            if (seg <= 0.0) continue
+            while (accum + seg >= nextMark && nextMark < totalMeters - 220.0) {
+                val frac = ((nextMark - accum) / seg).coerceIn(0.0, 1.0)
+                val lat = path[i - 1].latitude + (path[i].latitude - path[i - 1].latitude) * frac
+                val lon = path[i - 1].longitude + (path[i].longitude - path[i - 1].longitude) * frac
+                val km = nextMark / 1000.0
+                val label = if (km % 1.0 == 0.0) {
+                    String.format(Locale.US, "%.0f км", km)
+                } else {
+                    String.format(Locale.US, "%.1f км", km)
+                }
+                out.add(RouteMilepost(GeoPoint(lat, lon), label, nextMark.toInt()))
+                nextMark += stepMeters
+            }
+            accum += seg
+        }
+        return out
+    }
+
+    private fun buildDirectionArrows(path: List<GeoPoint>, totalMeters: Double): List<DirectionArrow> {
+        if (path.size < 3) return emptyList()
+        val count = when {
+            totalMeters < 1800.0 -> 4
+            totalMeters < 4500.0 -> 6
+            else -> 8
+        }
+        val stepDist = totalMeters / (count + 0.5)
+        val out = ArrayList<DirectionArrow>(count)
+        var accum = 0.0
+        var nextTarget = (stepDist * 0.35).coerceAtLeast(90.0)
+
+        for (i in 1 until path.size) {
+            val p1 = path[i - 1]
+            val p2 = path[i]
+            val seg = p1.distanceToAsDouble(p2)
+            if (seg < 2.0) continue
+            if (accum + seg >= nextTarget && out.size < count) {
+                val frac = ((nextTarget - accum) / seg).coerceIn(0.0, 1.0)
+                val lat = p1.latitude + (p2.latitude - p1.latitude) * frac
+                val lon = p1.longitude + (p2.longitude - p1.longitude) * frac
+                val bearing = p1.bearingTo(p2).toFloat()
+                out.add(DirectionArrow(GeoPoint(lat, lon), bearing))
+                nextTarget += stepDist
+            }
+            accum += seg
+        }
+        return out
+    }
+
     private fun queryValhallaPedestrian(
         waypoints: List<GeoPoint>,
         profile: RouteProfile,
@@ -118,7 +198,7 @@ object RouteEngine {
                 readTimeout = 9000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("User-Agent", "LoopWalk-Android/1.1")
+                setRequestProperty("User-Agent", "LoopWalk-Android/1.3")
             }
 
             val locationsJson = JSONArray()
