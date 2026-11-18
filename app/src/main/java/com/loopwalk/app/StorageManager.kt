@@ -16,6 +16,28 @@ import kotlin.random.Random
 class StorageManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("loopwalk_local_db", Context.MODE_PRIVATE)
 
+    fun loadGeneratorPrefs(): GeneratorPrefs {
+        val modeName = prefs.getString("gen_input_mode", InputMode.TIME.name) ?: InputMode.TIME.name
+        val profName = prefs.getString("gen_route_profile", RouteProfile.SCENIC.name) ?: RouteProfile.SCENIC.name
+        val mode = InputMode.entries.find { it.name == modeName } ?: InputMode.TIME
+        val prof = RouteProfile.entries.find { it.name == profName } ?: RouteProfile.SCENIC
+        val defaultSlider = when (mode) {
+            InputMode.TIME -> 15f
+            InputMode.DISTANCE -> 3.0f
+            InputMode.STEPS -> 4000f
+        }
+        val slider = prefs.getFloat("gen_slider_val", defaultSlider)
+        return GeneratorPrefs(mode, prof, slider)
+    }
+
+    fun saveGeneratorPrefs(mode: InputMode, profile: RouteProfile, sliderValue: Float) {
+        prefs.edit()
+            .putString("gen_input_mode", mode.name)
+            .putString("gen_route_profile", profile.name)
+            .putFloat("gen_slider_val", sliderValue)
+            .apply()
+    }
+
     fun loadProfile(): UserProfile {
         val today = LocalDate.now().toEpochDay()
         var streak = prefs.getInt("streak_days", 0)
@@ -52,7 +74,9 @@ class StorageManager(private val context: Context) {
             heightCm = prefs.getInt("height_cm", 178),
             paceKmh = prefs.getFloat("pace_kmh", 4.8f).toDouble(),
             hapticNavEnabled = prefs.getBoolean("haptic_nav", true),
-            showMileposts = prefs.getBoolean("show_mileposts", true)
+            voiceNavEnabled = prefs.getBoolean("voice_nav", true),
+            showMileposts = prefs.getBoolean("show_mileposts", true),
+            keepScreenOn = prefs.getBoolean("keep_screen_on", true)
         )
     }
 
@@ -60,14 +84,23 @@ class StorageManager(private val context: Context) {
         heightCm: Int,
         paceKmh: Double,
         hapticNav: Boolean,
-        showMileposts: Boolean
+        voiceNav: Boolean,
+        showMileposts: Boolean,
+        keepScreenOn: Boolean
     ): UserProfile {
         prefs.edit()
             .putInt("height_cm", heightCm.coerceIn(130, 220))
             .putFloat("pace_kmh", paceKmh.coerceIn(2.5, 8.0).toFloat())
             .putBoolean("haptic_nav", hapticNav)
+            .putBoolean("voice_nav", voiceNav)
             .putBoolean("show_mileposts", showMileposts)
+            .putBoolean("keep_screen_on", keepScreenOn)
             .apply()
+        return loadProfile()
+    }
+
+    fun setVoiceEnabled(enabled: Boolean): UserProfile {
+        prefs.edit().putBoolean("voice_nav", enabled).apply()
         return loadProfile()
     }
 

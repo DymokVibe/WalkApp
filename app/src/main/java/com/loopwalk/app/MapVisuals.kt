@@ -19,11 +19,11 @@ class MapVisuals(private val context: Context) {
     private fun dp(v: Float): Float = v * density
 
     fun userPuck(bearingDeg: Float?): Drawable {
-        val bucket = if (bearingDeg != null && bearingDeg > 0f) {
-            ((bearingDeg / 15f).roundToInt() * 15) % 360
+        val bucket = if (bearingDeg != null && bearingDeg >= 0f) {
+            ((bearingDeg / 10f).roundToInt() * 10 + 360) % 360
         } else -1
         return cache.getOrPut("user_$bucket") {
-            val size = dp(48f).roundToInt()
+            val size = dp(52f).roundToInt()
             val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
             val c = Canvas(bmp)
             val cx = size / 2f
@@ -31,25 +31,22 @@ class MapVisuals(private val context: Context) {
 
             val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-            // Внешнее радарное свечение
             paint.style = Paint.Style.FILL
             paint.color = Color.argb(46, 0, 255, 102)
-            c.drawCircle(cx, cy, dp(21f), paint)
+            c.drawCircle(cx, cy, dp(22f), paint)
 
-            // Кольцо радара
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = dp(1.5f)
-            paint.color = Color.argb(140, 0, 255, 102)
-            c.drawCircle(cx, cy, dp(14f), paint)
+            paint.color = Color.argb(145, 0, 255, 102)
+            c.drawCircle(cx, cy, dp(14.5f), paint)
 
-            // Стрелка курса при движении
             if (bucket >= 0) {
                 c.save()
                 c.rotate(bucket.toFloat(), cx, cy)
                 val arrow = Path().apply {
-                    moveTo(cx, cy - dp(21f))
-                    lineTo(cx - dp(5f), cy - dp(12f))
-                    lineTo(cx + dp(5f), cy - dp(12f))
+                    moveTo(cx, cy - dp(23f))
+                    lineTo(cx - dp(5.5f), cy - dp(12.5f))
+                    lineTo(cx + dp(5.5f), cy - dp(12.5f))
                     close()
                 }
                 paint.style = Paint.Style.FILL
@@ -58,16 +55,13 @@ class MapVisuals(private val context: Context) {
                 c.restore()
             }
 
-            // Тёмная подложка ядра
             paint.style = Paint.Style.FILL
             paint.color = Color.rgb(5, 12, 8)
             c.drawCircle(cx, cy, dp(8.5f), paint)
 
-            // Изумрудное ядро
             paint.color = Color.rgb(0, 255, 102)
             c.drawCircle(cx, cy, dp(6.2f), paint)
 
-            // Белый блик в центре
             paint.color = Color.WHITE
             c.drawCircle(cx, cy, dp(2.2f), paint)
 
@@ -85,12 +79,10 @@ class MapVisuals(private val context: Context) {
             val cy = dp(15f)
             val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-            // Свечение
             paint.style = Paint.Style.FILL
             paint.color = Color.argb(55, 255, 176, 0)
             c.drawCircle(cx, cy, dp(14f), paint)
 
-            // Круглый знак старта
             paint.color = Color.rgb(12, 10, 4)
             c.drawCircle(cx, cy, dp(10f), paint)
 
@@ -99,7 +91,6 @@ class MapVisuals(private val context: Context) {
             paint.color = Color.rgb(255, 176, 0)
             c.drawCircle(cx, cy, dp(10f), paint)
 
-            // Иконка домика внутри
             val house = Path().apply {
                 moveTo(cx, cy - dp(5f))
                 lineTo(cx + dp(5f), cy - dp(0.5f))
@@ -114,7 +105,6 @@ class MapVisuals(private val context: Context) {
             paint.color = Color.rgb(255, 176, 0)
             c.drawPath(house, paint)
 
-            // Плашка "ДОМ" снизу
             val rect = RectF(dp(7f), dp(27f), w - dp(7f), h - dp(2f))
             paint.color = Color.argb(235, 10, 10, 10)
             c.drawRoundRect(rect, dp(4f), dp(4f), paint)
@@ -148,12 +138,10 @@ class MapVisuals(private val context: Context) {
             val mainColor = if (collected) Color.rgb(0, 255, 102) else Color.rgb(0, 229, 255)
             val glowColor = if (collected) Color.argb(45, 0, 255, 102) else Color.argb(65, 0, 229, 255)
 
-            // Ореол
             paint.style = Paint.Style.FILL
             paint.color = glowColor
             c.drawCircle(cx, cy, dp(15f), paint)
 
-            // Внешний ромб
             val r = dp(11f)
             val diamond = Path().apply {
                 moveTo(cx, cy - r)
@@ -170,7 +158,6 @@ class MapVisuals(private val context: Context) {
             paint.color = mainColor
             c.drawPath(diamond, paint)
 
-            // Внутренний ромб / точка
             val rIn = dp(4.5f)
             val inner = Path().apply {
                 moveTo(cx, cy - rIn)
@@ -183,7 +170,6 @@ class MapVisuals(private val context: Context) {
             paint.color = mainColor
             c.drawPath(inner, paint)
 
-            // Плашка под ромбом
             val label = if (collected) "OK #$index" else "М-$index"
             val rect = RectF(dp(8f), dp(29f), w - dp(8f), h - dp(2f))
             paint.color = Color.argb(235, 6, 12, 16)
@@ -282,12 +268,10 @@ class MapVisuals(private val context: Context) {
             val cy = dp(17f)
             val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-            // Свечение
             paint.style = Paint.Style.FILL
             paint.color = Color.argb(55, 255, 176, 0)
             c.drawCircle(cx, cy, dp(15f), paint)
 
-            // Прицел
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = dp(2f)
             paint.color = Color.rgb(255, 176, 0)
@@ -301,7 +285,6 @@ class MapVisuals(private val context: Context) {
             paint.style = Paint.Style.FILL
             c.drawCircle(cx, cy, dp(2.5f), paint)
 
-            // Плашка "ВЕКТОР"
             val rect = RectF(dp(7f), dp(32f), w - dp(7f), h - dp(2f))
             paint.color = Color.argb(235, 14, 10, 4)
             c.drawRoundRect(rect, dp(4f), dp(4f), paint)
@@ -324,7 +307,7 @@ class MapVisuals(private val context: Context) {
 
     fun nextTurnDot(): Drawable {
         return cache.getOrPut("next_turn_dot") {
-            val size = dp(26f).roundToInt()
+            val size = dp(30f).roundToInt()
             val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
             val c = Canvas(bmp)
             val cx = size / 2f
@@ -332,17 +315,17 @@ class MapVisuals(private val context: Context) {
             val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
             paint.style = Paint.Style.FILL
-            paint.color = Color.argb(70, 255, 176, 0)
-            c.drawCircle(cx, cy, dp(12f), paint)
+            paint.color = Color.argb(80, 255, 176, 0)
+            c.drawCircle(cx, cy, dp(13.5f), paint)
 
             paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(2f)
+            paint.strokeWidth = dp(2.2f)
             paint.color = Color.rgb(255, 176, 0)
-            c.drawCircle(cx, cy, dp(8f), paint)
+            c.drawCircle(cx, cy, dp(9f), paint)
 
             paint.style = Paint.Style.FILL
             paint.color = Color.WHITE
-            c.drawCircle(cx, cy, dp(3.5f), paint)
+            c.drawCircle(cx, cy, dp(4f), paint)
 
             BitmapDrawable(context.resources, bmp)
         }

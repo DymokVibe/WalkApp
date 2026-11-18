@@ -35,11 +35,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.osmdroid.util.GeoPoint
 import java.util.Locale
+import kotlin.math.roundToInt
 
 data class ActiveWalkState(
     val isWalking: Boolean = false,
     val isPaused: Boolean = false,
     val currentLocation: GeoPoint? = null,
+    val currentAccuracyMeters: Float? = null,
     val currentBearing: Float? = null,
     val walkStartPoint: GeoPoint? = null,
     val walkedMeters: Double = 0.0,
@@ -50,8 +52,14 @@ data class ActiveWalkState(
     val activeBeacons: List<RouteBeacon> = emptyList(),
     val nextManeuverPoint: GeoPoint? = null,
     val nextManeuverHint: String? = null,
+    val nextManeuverDirection: TurnDirection = TurnDirection.STRAIGHT,
+    val afterNextManeuverHint: String? = null,
     val distanceToNextTurnMeters: Int? = null,
     val nearestBeaconMeters: Int? = null,
+    val routeClosestPoint: GeoPoint? = null,
+    val routeClosestSegmentIdx: Int = 0,
+    val offRouteMeters: Double = 0.0,
+    val remainingRouteMeters: Double = 0.0,
     val eventFlash: String? = null
 )
 
@@ -62,25 +70,36 @@ object WalkSessionHolder {
     var activeRoute: LoopRoute? = null
     var exploredBaseline: Set<String> = emptySet()
     var hapticEnabled: Boolean = true
+    var voiceEnabled: Boolean = true
 
-    fun updateLocationPassive(pt: GeoPoint, bearing: Float? = null) {
+    fun updateLocationPassive(pt: GeoPoint, accuracy: Float? = null, bearing: Float? = null) {
         _state.update {
             it.copy(
                 currentLocation = pt,
+                currentAccuracyMeters = accuracy ?: it.currentAccuracyMeters,
                 currentBearing = bearing ?: it.currentBearing
             )
         }
     }
 
-    fun startNewSession(startPt: GeoPoint?, route: LoopRoute?, knownSectors: Set<String>, haptic: Boolean) {
+    fun startNewSession(
+        startPt: GeoPoint?,
+        route: LoopRoute?,
+        knownSectors: Set<String>,
+        haptic: Boolean,
+        voice: Boolean
+    ) {
         activeRoute = route
         exploredBaseline = knownSectors
         hapticEnabled = haptic
-        val firstManeuver = route?.maneuvers?.getOrNull(1)
+        voiceEnabled = voice
+        val firstManeuver = route?.maneuvers?.getOrNull(1) ?: route?.maneuvers?.firstOrNull()
+        val secondManeuver = route?.maneuvers?.getOrNull(2)
         _state.value = ActiveWalkState(
             isWalking = true,
             isPaused = false,
             currentLocation = startPt,
+            currentAccuracyMeters = _state.value.currentAccuracyMeters,
             walkStartPoint = startPt,
             walkedMeters = 0.0,
             elapsedSeconds = 0L,
@@ -89,8 +108,30 @@ object WalkSessionHolder {
             newlyDiscoveredSectors = emptySet(),
             activeBeacons = route?.beacons ?: emptyList(),
             nextManeuverPoint = firstManeuver?.point,
-            nextManeuverHint = firstManeuver?.instruction
+            nextManeuverHint = firstManeuver?.instruction,
+            nextManeuverDirection = firstManeuver?.direction ?: TurnDirection.STRAIGHT,
+            afterNextManeuverHint = secondManeuver?.instruction,
+            remainingRouteMeters = route?.distanceMeters ?: 0.0
         )
+    }
+
+    fun replaceActiveRoute(newRoute: LoopRoute, announcement: String? = null) {
+        activeRoute = newRoute
+        val firstManeuver = newRoute.maneuvers.getOrNull(1) ?: newRoute.maneuvers.firstOrNull()
+        val secondManeuver = newRoute.maneuvers.getOrNull(2)
+        _state.update {
+            it.copy(
+                routeClosestSegmentIdx = 0,
+                routeClosestPoint = newRoute.points.firstOrNull(),
+                offRouteMeters = 0.0,
+                remainingRouteMeters = newRoute.distanceMeters,
+                nextManeuverPoint = firstManeuver?.point,
+                nextManeuverHint = firstManeuver?.instruction,
+                nextManeuverDirection = firstManeuver?.direction ?: TurnDirection.STRAIGHT,
+                afterNextManeuverHint = secondManeuver?.instruction,
+                eventFlash = announcement ?: it.eventFlash
+            )
+        }
     }
 
     fun togglePause() {
@@ -105,6 +146,7 @@ object WalkSessionHolder {
         val snapshot = _state.value
         _state.value = ActiveWalkState(
             currentLocation = snapshot.currentLocation,
+            currentAccuracyMeters = snapshot.currentAccuracyMeters,
             currentBearing = snapshot.currentBearing
         )
         return snapshot
@@ -129,16 +171,22 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
     private lateinit var storage: StorageManager
+    private var voiceGuide: WalkVoiceGuide? = null
 
-    private var initialSensorSteps = -1
+    private var lastSensorTotal = -1
+    private var accumulatedSessionSteps = 0
     private var lastGpsTimeMs = 0L
-    private val alertedManeuverIndices = HashSet<Int>()
+    private val voiceAlertedManeuvers = HashSet<Int>()
+    private val hapticAlertedManeuvers = HashSet<Int>()
+    private var wasOffRouteAlerted = false
+    private var homeArrivalAnnounced = false
 
     override fun onCreate() {
         super.onCreate()
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         storage = StorageManager(this)
+        voiceGuide = WalkVoiceGuide(this)
         createNotificationChannel()
     }
 
@@ -149,9 +197,13 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
             return START_NOT_STICKY
         }
 
-        initialSensorSteps = -1
+        lastSensorTotal = -1
+        accumulatedSessionSteps = 0
         lastGpsTimeMs = 0L
-        alertedManeuverIndices.clear()
+        voiceAlertedManeuvers.clear()
+        hapticAlertedManeuvers.clear()
+        wasOffRouteAlerted = false
+        homeArrivalAnnounced = false
 
         val notification = buildNotification("Прогулка запущена", "Ожидание GPS...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -170,6 +222,8 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
         if (stepSensor != null) {
             sensorManager.registerListener(this, stepSensor, SensorManager.SENSOR_DELAY_UI)
         }
+
+        voiceGuide?.speak("Маршрут запущен. Следуйте по зелёному контуру.")
 
         timerJob?.cancel()
         timerJob = serviceScope.launch {
@@ -190,13 +244,18 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
     override fun onLocationChanged(loc: Location) {
         val pt = GeoPoint(loc.latitude, loc.longitude)
         val bearing = if (loc.hasBearing() && loc.speed > 0.6f) loc.bearing else null
+        val acc = if (loc.hasAccuracy()) loc.accuracy else null
         val st = WalkSessionHolder.state.value
         val prev = st.currentLocation
         val nowMs = System.currentTimeMillis()
 
         if (!st.isWalking || st.isPaused) {
             WalkSessionHolder.mutate {
-                it.copy(currentLocation = pt, currentBearing = bearing ?: it.currentBearing)
+                it.copy(
+                    currentLocation = pt,
+                    currentAccuracyMeters = acc ?: it.currentAccuracyMeters,
+                    currentBearing = bearing ?: it.currentBearing
+                )
             }
             lastGpsTimeMs = nowMs
             return
@@ -214,6 +273,7 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
             }
         }
         lastGpsTimeMs = nowMs
+        val newWalkedMeters = st.walkedMeters + addedDist
 
         val secKey = storage.sectorKey(pt)
         val updatedSectors = if (secKey !in WalkSessionHolder.exploredBaseline) {
@@ -232,56 +292,131 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
                 if (d <= 35.0) {
                     vibratePattern(longArrayOf(0, 90, 70, 140))
                     flashMsg = "[+] ${beacon.title} РАСШИФРОВАН (+${beacon.xpReward} XP)"
+                    voiceGuide?.speak("${beacon.title} расшифрован. Плюс ${beacon.xpReward} опыта.")
                     beacon.copy(collected = true)
                 } else beacon
             } else beacon
         }
 
+        // Монотонная проекция на маршрут внутри скользящего окна вперед, чтобы не перескакивать на финиш
+        val route = WalkSessionHolder.activeRoute
+        var projPoint: GeoPoint? = st.routeClosestPoint
+        var segIdx = st.routeClosestSegmentIdx
+        var offRoute = 0.0
+        var remMeters = st.remainingRouteMeters
         var nextHint = st.nextManeuverHint
+        var nextDir = st.nextManeuverDirection
+        var afterNextHint = st.afterNextManeuverHint
         var nextTurnPt = st.nextManeuverPoint
         var nextTurnDist: Int? = null
-        val maneuvers = WalkSessionHolder.activeRoute?.maneuvers.orEmpty()
-        for (i in 1 until maneuvers.size) {
-            if (i in alertedManeuverIndices) continue
-            val m = maneuvers[i]
-            val distToTurn = pt.distanceToAsDouble(m.point)
-            nextHint = m.instruction
-            nextTurnPt = m.point
-            nextTurnDist = distToTurn.toInt()
-            if (distToTurn <= 30.0) {
-                alertedManeuverIndices.add(i)
-                vibratePattern(longArrayOf(0, 120))
+
+        if (route != null && route.points.size >= 2) {
+            val winStart = (st.routeClosestSegmentIdx - 3).coerceAtLeast(0)
+            val winEnd = (st.routeClosestSegmentIdx + 48).coerceAtMost(route.points.lastIndex)
+            var proj = RouteEngine.projectOntoRoute(pt, route.points, winStart, winEnd)
+
+            // Если отошли далеко от локального окна, проверяем оставшуюся часть трека впереди
+            if (proj.offRouteMeters > 55.0 && winEnd < route.points.lastIndex) {
+                val widerProj = RouteEngine.projectOntoRoute(pt, route.points, winStart, route.points.lastIndex)
+                if (widerProj.offRouteMeters < proj.offRouteMeters) {
+                    proj = widerProj
+                }
             }
-            break
+
+            projPoint = proj.projectedPoint
+            segIdx = proj.segmentIndex
+            offRoute = proj.offRouteMeters
+            remMeters = proj.remainingMeters
+
+            if (offRoute > 45.0 && !wasOffRouteAlerted) {
+                wasOffRouteAlerted = true
+                vibratePattern(longArrayOf(0, 160, 90, 160))
+                voiceGuide?.speak("Вы отклонились от маршрута.")
+            } else if (offRoute <= 28.0) {
+                wasOffRouteAlerted = false
+            }
+
+            val maneuvers = route.maneuvers
+            val upcomingIdx = maneuvers.indexOfFirst { m ->
+                m.shapeIndex > segIdx && pt.distanceToAsDouble(m.point) > 10.0
+            }
+
+            if (upcomingIdx >= 0) {
+                val m = maneuvers[upcomingIdx]
+                val distAlong = RouteEngine.distanceAlongPath(proj.projectedPoint, segIdx, m.shapeIndex, route.points)
+                val distRounded = distAlong.roundToInt()
+                nextHint = m.instruction
+                nextDir = m.direction
+                nextTurnPt = m.point
+                nextTurnDist = distRounded
+                afterNextHint = maneuvers.getOrNull(upcomingIdx + 1)?.instruction
+
+                if (distAlong <= 65.0 && upcomingIdx !in voiceAlertedManeuvers) {
+                    voiceAlertedManeuvers.add(upcomingIdx)
+                    voiceGuide?.speak("Через $distRounded метров ${m.instruction.lowercase(Locale.getDefault())}")
+                }
+                if (distAlong <= 24.0 && upcomingIdx !in hapticAlertedManeuvers) {
+                    hapticAlertedManeuvers.add(upcomingIdx)
+                    vibratePattern(longArrayOf(0, 130))
+                }
+            } else if (maneuvers.isNotEmpty()) {
+                val lastM = maneuvers.last()
+                val dFinish = pt.distanceToAsDouble(lastM.point).roundToInt()
+                nextHint = lastM.instruction
+                nextDir = TurnDirection.FINISH
+                nextTurnPt = lastM.point
+                nextTurnDist = dFinish
+                afterNextHint = null
+            }
+        }
+
+        val startPt = st.walkStartPoint ?: pt
+        if (newWalkedMeters >= 300.0 && !homeArrivalAnnounced && startPt.distanceToAsDouble(pt) <= 65.0) {
+            homeArrivalAnnounced = true
+            vibratePattern(longArrayOf(0, 100, 60, 100, 60, 180))
+            voiceGuide?.speak("Вы вернулись в зону старта. Круг можно завершать.")
+            flashMsg = "[+] ВЫ В ЗОНЕ СТАРТА — МОЖНО ЗАВЕРШАТЬ КРУГ"
         }
 
         WalkSessionHolder.mutate {
             it.copy(
                 currentLocation = pt,
+                currentAccuracyMeters = acc ?: it.currentAccuracyMeters,
                 currentBearing = bearing ?: it.currentBearing,
-                walkStartPoint = it.walkStartPoint ?: pt,
-                walkedMeters = it.walkedMeters + addedDist,
+                walkStartPoint = startPt,
+                walkedMeters = newWalkedMeters,
                 breadcrumbTrail = if (addedDist > 0.0 || it.breadcrumbTrail.isEmpty()) it.breadcrumbTrail + pt else it.breadcrumbTrail,
                 newlyDiscoveredSectors = updatedSectors,
                 activeBeacons = updatedBeacons,
                 nextManeuverPoint = nextTurnPt,
                 nextManeuverHint = nextHint,
+                nextManeuverDirection = nextDir,
+                afterNextManeuverHint = afterNextHint,
                 distanceToNextTurnMeters = nextTurnDist,
                 nearestBeaconMeters = minBeaconDist,
+                routeClosestPoint = projPoint,
+                routeClosestSegmentIdx = segIdx,
+                offRouteMeters = offRoute,
+                remainingRouteMeters = remMeters,
                 eventFlash = flashMsg
             )
         }
     }
 
     override fun onSensorChanged(event: SensorEvent) {
+        val total = event.values[0].toInt()
+        if (lastSensorTotal < 0) {
+            lastSensorTotal = total
+            return
+        }
+        val delta = (total - lastSensorTotal).coerceAtLeast(0)
+        lastSensorTotal = total
+
         val st = WalkSessionHolder.state.value
         if (!st.isWalking || st.isPaused) return
-        val total = event.values[0].toInt()
-        if (initialSensorSteps < 0) {
-            initialSensorSteps = total
-        }
-        val deltaSteps = (total - initialSensorSteps).coerceAtLeast(0)
-        WalkSessionHolder.mutate { it.copy(sessionSteps = deltaSteps) }
+
+        accumulatedSessionSteps += delta
+        WalkSessionHolder.mutate { it.copy(sessionSteps = accumulatedSessionSteps) }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -342,6 +477,7 @@ class WalkTrackingService : Service(), LocationListener, SensorEventListener {
     override fun onDestroy() {
         timerJob?.cancel()
         serviceScope.cancel()
+        voiceGuide?.shutdown()
         try {
             locationManager.removeUpdates(this)
             sensorManager.unregisterListener(this)

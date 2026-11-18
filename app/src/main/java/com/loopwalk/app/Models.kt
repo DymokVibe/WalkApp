@@ -14,10 +14,26 @@ enum class RouteProfile(val label: String) {
     NIGHT_LIT("ФОНАРИ")
 }
 
+enum class TurnDirection(val glyph: String, val shortLabel: String) {
+    START("◎", "СТАРТ"),
+    STRAIGHT("↑", "ПРЯМО"),
+    SLIGHT_RIGHT("↗", "ПРАВЕЕ"),
+    RIGHT("→", "НАПРАВО"),
+    SHARP_RIGHT("↘", "РЕЗКО ВПРАВО"),
+    UTURN("↺", "РАЗВОРОТ"),
+    SHARP_LEFT("↙", "РЕЗКО ВЛЕВО"),
+    LEFT("←", "НАЛЕВО"),
+    SLIGHT_LEFT("↖", "ЛЕВЕЕ"),
+    ROUNDABOUT("↻", "КРУГ"),
+    FINISH("🏁", "ФИНИШ")
+}
+
 data class RouteManeuver(
     val point: GeoPoint,
     val instruction: String,
-    val distanceKm: Double
+    val distanceKm: Double,
+    val shapeIndex: Int = 0,
+    val direction: TurnDirection = TurnDirection.STRAIGHT
 )
 
 data class RouteBeacon(
@@ -39,12 +55,34 @@ data class DirectionArrow(
     val bearingDeg: Float
 )
 
+data class RouteProjection(
+    val segmentIndex: Int,
+    val projectedPoint: GeoPoint,
+    val offRouteMeters: Double,
+    val remainingMeters: Double
+)
+
+data class SelectedPinInfo(
+    val title: String,
+    val subtitle: String,
+    val badge: String,
+    val point: GeoPoint,
+    val canSteerHere: Boolean = true
+)
+
+data class GeneratorPrefs(
+    val inputMode: InputMode = InputMode.TIME,
+    val routeProfile: RouteProfile = RouteProfile.SCENIC,
+    val sliderValue: Float = 15f
+)
+
 data class LoopRoute(
     val points: List<GeoPoint>,
     val distanceMeters: Double,
     val estimatedMinutes: Int,
     val estimatedSteps: Int,
     val profile: RouteProfile,
+    val baseBearingDeg: Double = 0.0,
     val maneuvers: List<RouteManeuver> = emptyList(),
     val beacons: List<RouteBeacon> = emptyList(),
     val mileposts: List<RouteMilepost> = emptyList(),
@@ -94,7 +132,9 @@ data class UserProfile(
     val heightCm: Int = 178,
     val paceKmh: Double = 4.8,
     val hapticNavEnabled: Boolean = true,
-    val showMileposts: Boolean = true
+    val voiceNavEnabled: Boolean = true,
+    val showMileposts: Boolean = true,
+    val keepScreenOn: Boolean = true
 ) {
     val strideMeters: Double
         get() = (heightCm * 0.415) / 100.0
@@ -152,7 +192,7 @@ data class UserProfile(
                 "BEACONS_10",
                 "ПЕРЕХВАТЧИК СИГНАЛОВ",
                 "Расшифровать 10 сигнальных маяков",
-                (totalBeaconsCollected / 10f).coerceIn(0f, 1f),
+                (totalBeaconsCollected / 10f).toFloat().coerceIn(0f, 1f),
                 totalBeaconsCollected >= 10
             ),
             Achievement(

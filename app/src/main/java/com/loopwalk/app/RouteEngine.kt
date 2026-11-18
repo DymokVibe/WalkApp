@@ -11,6 +11,7 @@ import java.util.Locale
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.random.Random
 
@@ -32,10 +33,13 @@ object RouteEngine {
         targetMeters: Double,
         routeProfile: RouteProfile,
         userProfile: UserProfile,
-        directionAnchor: GeoPoint? = null
+        directionAnchor: GeoPoint? = null,
+        avoidBearingDeg: Double? = null
     ): LoopRoute = withContext(Dispatchers.IO) {
         val baseBearing = if (directionAnchor != null) {
             start.bearingTo(directionAnchor)
+        } else if (avoidBearingDeg != null) {
+            (avoidBearingDeg + Random.nextDouble(65.0, 295.0)) % 360.0
         } else {
             Random.nextDouble(0.0, 360.0)
         }
@@ -43,17 +47,24 @@ object RouteEngine {
 
         var legRadiusMeters = if (directionAnchor != null) {
             val anchorDist = start.distanceToAsDouble(directionAnchor)
-            anchorDist.coerceIn(targetMeters * 0.22, targetMeters * 0.42)
+            anchorDist.coerceIn(targetMeters * 0.22, targetMeters * 0.40)
         } else {
-            targetMeters / 4.25
+            targetMeters / 4.35
         }
 
         var bestResult: ValhallaResult? = null
 
         for (attempt in 0 until 3) {
-            val wp1 = offsetPoint(start, legRadiusMeters, baseBearing + 34.0 * direction)
-            val wp2 = offsetPoint(start, legRadiusMeters, baseBearing - 34.0 * direction)
-            val waypoints = listOf(start, wp1, wp2, start)
+            val waypoints = if (targetMeters >= 2200.0) {
+                val wp1 = offsetPoint(start, legRadiusMeters * 0.92, baseBearing + 44.0 * direction)
+                val wp2 = offsetPoint(start, legRadiusMeters * 1.15, baseBearing)
+                val wp3 = offsetPoint(start, legRadiusMeters * 0.92, baseBearing - 44.0 * direction)
+                listOf(start, wp1, wp2, wp3, start)
+            } else {
+                val wp1 = offsetPoint(start, legRadiusMeters, baseBearing + 38.0 * direction)
+                val wp2 = offsetPoint(start, legRadiusMeters, baseBearing - 38.0 * direction)
+                listOf(start, wp1, wp2, start)
+            }
 
             val result = queryValhallaPedestrian(waypoints, routeProfile, userProfile.paceKmh)
             if (result != null) {
@@ -80,6 +91,7 @@ object RouteEngine {
                 estimatedMinutes = minutes,
                 estimatedSteps = steps,
                 profile = routeProfile,
+                baseBearingDeg = baseBearing,
                 maneuvers = bestResult.maneuvers,
                 beacons = beacons,
                 mileposts = mileposts,
@@ -87,9 +99,9 @@ object RouteEngine {
                 isOfflineFallback = false
             )
         } else {
-            val r = targetMeters / 3.15
-            val wp1 = offsetPoint(start, r, baseBearing + 35.0 * direction)
-            val wp2 = offsetPoint(start, r, baseBearing - 35.0 * direction)
+            val r = targetMeters / 3.25
+            val wp1 = offsetPoint(start, r, baseBearing + 38.0 * direction)
+            val wp2 = offsetPoint(start, r, baseBearing - 38.0 * direction)
             val fallbackPoints = listOf(start, wp1, wp2, start)
             val minutes = ((targetMeters / 1000.0) / userProfile.paceKmh * 60.0)
                 .toInt().coerceAtLeast(1)
@@ -100,6 +112,12 @@ object RouteEngine {
             )
             val mileposts = buildMileposts(fallbackPoints, targetMeters)
             val arrows = buildDirectionArrows(fallbackPoints, targetMeters)
+            val offlineManeuvers = listOf(
+                RouteManeuver(start, "Двигайтесь к первой точке контура", targetMeters / 3000.0, 0, TurnDirection.START),
+                RouteManeuver(wp1, "Поверните на вторую дугу круга", targetMeters / 3000.0, 1, TurnDirection.RIGHT),
+                RouteManeuver(wp2, "Возвращайтесь к точке старта", targetMeters / 3000.0, 2, TurnDirection.RIGHT),
+                RouteManeuver(start, "Точка старта достигнута", 0.0, 3, TurnDirection.FINISH)
+            )
 
             LoopRoute(
                 points = fallbackPoints,
@@ -107,12 +125,171 @@ object RouteEngine {
                 estimatedMinutes = minutes,
                 estimatedSteps = steps,
                 profile = routeProfile,
-                maneuvers = emptyList(),
+                baseBearingDeg = baseBearing,
+                maneuvers = offlineManeuvers,
                 beacons = beacons,
                 mileposts = mileposts,
                 arrows = arrows,
                 isOfflineFallback = true
             )
+        }
+    }
+
+    /**
+     * Перестраивает путь домой от текущей позиции (кратчайший или с добором дистанции).
+     */
+    suspend fun rerouteBackHome(
+        currentPos: GeoPoint,
+        homePos: GeoPoint,
+        remainingTargetMeters: Double,
+        routeProfile: RouteProfile,
+        userProfile: UserProfile,
+        directShortcut: Boolean = false
+    ): LoopRoute = withContext(Dispatchers.IO) {
+        val directDist = currentPos.distanceToAsDouble(homePos)
+        val waypoints = if (!directShortcut && remainingTargetMeters > directDist * 1.45 && remainingTargetMeters >= 500.0) {
+            val bearingHome = currentPos.bearingTo(homePos)
+            val mid = GeoPoint(
+                (currentPos.latitude + homePos.latitude) / 2.0,
+                (currentPos.longitude + homePos.longitude) / 2.0
+            )
+            val sideOffset = ((remainingTargetMeters - directDist) * 0.45).coerceIn(120.0, 900.0)
+            val via = offsetPoint(mid, sideOffset, bearingHome + 75.0)
+            listOf(currentPos, via, homePos)
+        } else {
+            listOf(currentPos, homePos)
+        }
+
+        val result = queryValhallaPedestrian(waypoints, routeProfile, userProfile.paceKmh)
+        if (result != null && result.points.size >= 2) {
+            val minutes = ((result.distanceMeters / 1000.0) / userProfile.paceKmh * 60.0)
+                .toInt().coerceAtLeast(1)
+            val steps = (result.distanceMeters / userProfile.strideMeters).toInt()
+            LoopRoute(
+                points = result.points,
+                distanceMeters = result.distanceMeters,
+                estimatedMinutes = minutes,
+                estimatedSteps = steps,
+                profile = routeProfile,
+                maneuvers = result.maneuvers,
+                beacons = emptyList(),
+                mileposts = buildMileposts(result.points, result.distanceMeters),
+                arrows = buildDirectionArrows(result.points, result.distanceMeters),
+                isOfflineFallback = false
+            )
+        } else {
+            val fallbackPoints = listOf(currentPos, homePos)
+            val dist = directDist.coerceAtLeast(50.0)
+            val minutes = ((dist / 1000.0) / userProfile.paceKmh * 60.0).toInt().coerceAtLeast(1)
+            LoopRoute(
+                points = fallbackPoints,
+                distanceMeters = dist,
+                estimatedMinutes = minutes,
+                estimatedSteps = (dist / userProfile.strideMeters).toInt(),
+                profile = routeProfile,
+                maneuvers = listOf(
+                    RouteManeuver(currentPos, "Двигайтесь по направлению к дому", dist / 1000.0, 0, TurnDirection.STRAIGHT),
+                    RouteManeuver(homePos, "Вы прибыли к дому", 0.0, 1, TurnDirection.FINISH)
+                ),
+                arrows = buildDirectionArrows(fallbackPoints, dist),
+                isOfflineFallback = true
+            )
+        }
+    }
+
+    /**
+     * Проецирует текущие GPS-координаты на полилинию маршрута внутри заданного диапазона сегментов,
+     * чтобы не перескакивать на встречную/финишную ветку петли.
+     */
+    fun projectOntoRoute(
+        pt: GeoPoint,
+        path: List<GeoPoint>,
+        minSegmentIdx: Int = 0,
+        maxSegmentLimit: Int = path.lastIndex
+    ): RouteProjection {
+        if (path.size < 2) {
+            return RouteProjection(0, pt, 0.0, 0.0)
+        }
+        val cosLat = cos(Math.toRadians(pt.latitude)).coerceAtLeast(0.1)
+        val startIdx = minSegmentIdx.coerceIn(0, (path.lastIndex - 1).coerceAtLeast(0))
+        val limit = maxSegmentLimit.coerceIn(startIdx + 1, path.lastIndex)
+
+        var bestSeg = startIdx
+        var bestDist = Double.MAX_VALUE
+        var bestProj = path[startIdx]
+
+        for (i in startIdx until limit) {
+            val p1 = path[i]
+            val p2 = path[i + 1]
+            val ax = (p1.longitude - pt.longitude) * 111320.0 * cosLat
+            val ay = (p1.latitude - pt.latitude) * 110540.0
+            val bx = (p2.longitude - pt.longitude) * 111320.0 * cosLat
+            val by = (p2.latitude - pt.latitude) * 110540.0
+
+            val dx = bx - ax
+            val dy = by - ay
+            val lenSq = dx * dx + dy * dy
+            val t = if (lenSq > 1e-6) {
+                (-(ax * dx + ay * dy) / lenSq).coerceIn(0.0, 1.0)
+            } else 0.0
+
+            val px = ax + t * dx
+            val py = ay + t * dy
+            val d = hypot(px, py)
+            if (d < bestDist) {
+                bestDist = d
+                bestSeg = i
+                bestProj = GeoPoint(
+                    p1.latitude + t * (p2.latitude - p1.latitude),
+                    p1.longitude + t * (p2.longitude - p1.longitude)
+                )
+            }
+        }
+
+        var rem = bestProj.distanceToAsDouble(path[bestSeg + 1])
+        for (i in (bestSeg + 1) until path.lastIndex) {
+            rem += path[i].distanceToAsDouble(path[i + 1])
+        }
+
+        return RouteProjection(
+            segmentIndex = bestSeg,
+            projectedPoint = bestProj,
+            offRouteMeters = bestDist,
+            remainingMeters = rem
+        )
+    }
+
+    fun distanceAlongPath(
+        fromPoint: GeoPoint,
+        fromSegmentIndex: Int,
+        toShapeIndex: Int,
+        path: List<GeoPoint>
+    ): Double {
+        if (path.size < 2 || toShapeIndex <= fromSegmentIndex) {
+            return fromPoint.distanceToAsDouble(path.getOrElse(toShapeIndex.coerceIn(0, path.lastIndex)) { fromPoint })
+        }
+        val endIdx = toShapeIndex.coerceIn(0, path.lastIndex)
+        var sum = fromPoint.distanceToAsDouble(path[fromSegmentIndex + 1])
+        for (i in (fromSegmentIndex + 1) until endIdx) {
+            sum += path[i].distanceToAsDouble(path[i + 1])
+        }
+        return sum
+    }
+
+    private fun mapValhallaTurnType(type: Int): TurnDirection {
+        return when (type) {
+            1, 2, 3 -> TurnDirection.START
+            4, 5, 6 -> TurnDirection.FINISH
+            7, 8 -> TurnDirection.STRAIGHT
+            9 -> TurnDirection.SLIGHT_RIGHT
+            10 -> TurnDirection.RIGHT
+            11 -> TurnDirection.SHARP_RIGHT
+            12, 13 -> TurnDirection.UTURN
+            14 -> TurnDirection.SHARP_LEFT
+            15 -> TurnDirection.LEFT
+            16 -> TurnDirection.SLIGHT_LEFT
+            26, 27 -> TurnDirection.ROUNDABOUT
+            else -> TurnDirection.STRAIGHT
         }
     }
 
@@ -156,16 +333,16 @@ object RouteEngine {
     }
 
     private fun buildDirectionArrows(path: List<GeoPoint>, totalMeters: Double): List<DirectionArrow> {
-        if (path.size < 3) return emptyList()
+        if (path.size < 2) return emptyList()
         val count = when {
             totalMeters < 1800.0 -> 4
             totalMeters < 4500.0 -> 6
             else -> 8
         }
-        val stepDist = totalMeters / (count + 0.5)
+        val stepDist = (totalMeters / (count + 0.5)).coerceAtLeast(80.0)
         val out = ArrayList<DirectionArrow>(count)
         var accum = 0.0
-        var nextTarget = (stepDist * 0.35).coerceAtLeast(90.0)
+        var nextTarget = (stepDist * 0.35).coerceAtLeast(60.0)
 
         for (i in 1 until path.size) {
             val p1 = path[i - 1]
@@ -198,7 +375,7 @@ object RouteEngine {
                 readTimeout = 9000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("User-Agent", "LoopWalk-Android/1.3")
+                setRequestProperty("User-Agent", "LoopWalk-Android/1.5")
             }
 
             val locationsJson = JSONArray()
@@ -206,6 +383,7 @@ object RouteEngine {
                 locationsJson.put(JSONObject().apply {
                     put("lat", pt.latitude)
                     put("lon", pt.longitude)
+                    put("radius", 30)
                 })
             }
 
@@ -269,6 +447,7 @@ object RouteEngine {
                     for (j in 0 until mArray.length()) {
                         val m = mArray.getJSONObject(j)
                         val instruction = m.optString("instruction", "").trim()
+                        val mType = m.optInt("type", 8)
                         val beginIdx = (legStartIdx + m.optInt("begin_shape_index", 0))
                             .coerceIn(0, fullPath.lastIndex)
                         if (instruction.isNotEmpty()) {
@@ -276,7 +455,9 @@ object RouteEngine {
                                 RouteManeuver(
                                     point = fullPath[beginIdx],
                                     instruction = instruction,
-                                    distanceKm = m.optDouble("length", 0.0)
+                                    distanceKm = m.optDouble("length", 0.0),
+                                    shapeIndex = beginIdx,
+                                    direction = mapValhallaTurnType(mType)
                                 )
                             )
                         }
